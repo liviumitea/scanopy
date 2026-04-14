@@ -17,12 +17,11 @@ spec:
       storage: 10Gi
 ---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: postgres
   namespace: scanopy
 spec:
-  serviceName: postgres
   replicas: 1
   selector:
     matchLabels:
@@ -44,6 +43,8 @@ spec:
               value: postgres
             - name: POSTGRES_PASSWORD
               value: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
               name: postgres
@@ -64,7 +65,10 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
-  volumeClaimTemplates: []
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: scanopy-postgres-data
 ---
 apiVersion: v1
 kind: Service
@@ -78,7 +82,7 @@ spec:
     - name: postgres
       port: 5432
       targetPort: 5432
-  clusterIP: None
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -96,6 +100,22 @@ spec:
         app: scanopy-app
     spec:
       enableServiceLinks: false
+      initContainers:
+        - name: init-scanopy-paths
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /scanopy/daemon-config /scanopy/server-data
+              chmod -R 0777 /scanopy
+              ls -ld /scanopy /scanopy/daemon-config /scanopy/server-data
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: scanopy-host-data
+              mountPath: /scanopy
       containers:
         - name: daemon
           image: ghcr.io/scanopy/scanopy/daemon:latest
@@ -137,7 +157,7 @@ spec:
             - name: SCANOPY_LOG_LEVEL
               value: info
             - name: SCANOPY_DATABASE_URL
-              value: postgresql://postgres:password@postgres.scanopy.svc.cluster.local:5432/scanopy
+              value: postgresql://postgres:password@postgres:5432/scanopy
             - name: SCANOPY_WEB_EXTERNAL_PATH
               value: /app/static
             - name: SCANOPY_PUBLIC_URL
@@ -151,6 +171,10 @@ spec:
             - name: server-data
               mountPath: /data
       volumes:
+        - name: scanopy-host-data
+          hostPath:
+            path: /data-nfs/data/scanopy
+            type: DirectoryOrCreate
         - name: daemon-config
           hostPath:
             path: /data-nfs/data/scanopy/daemon-config
@@ -174,31 +198,3 @@ spec:
       targetPort: 60072
   type: LoadBalancer
   loadBalancerIP: 172.16.23.41
----
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: scanopy-postgres-pv
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: longhorn
-  csi:
-    driver: driver.longhorn.io
-    volumeHandle: scanopy-postgres-volume
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data
-  namespace: scanopy
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: longhorn
-  resources:
-    requests:
-      storage: 10Gi
