@@ -3,12 +3,26 @@ kind: Namespace
 metadata:
   name: scanopy
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scanopy-postgres-data
+  namespace: scanopy
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: scanopy
 spec:
+  serviceName: postgres
   replicas: 1
   selector:
     matchLabels:
@@ -18,6 +32,7 @@ spec:
       labels:
         app: scanopy-postgres
     spec:
+      enableServiceLinks: false
       containers:
         - name: postgres
           image: postgres:17-alpine
@@ -49,11 +64,7 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
-      volumes:
-        - name: postgres-data
-          hostPath:
-            path: /data-nfs/data/scanopy/postgres
-            type: DirectoryOrCreate
+  volumeClaimTemplates: []
 ---
 apiVersion: v1
 kind: Service
@@ -67,7 +78,7 @@ spec:
     - name: postgres
       port: 5432
       targetPort: 5432
-  type: ClusterIP
+  clusterIP: None
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,6 +95,7 @@ spec:
       labels:
         app: scanopy-app
     spec:
+      enableServiceLinks: false
       containers:
         - name: daemon
           image: ghcr.io/scanopy/scanopy/daemon:latest
@@ -117,13 +129,6 @@ spec:
           volumeMounts:
             - name: daemon-config
               mountPath: /root/.config/daemon
-          # Uncomment only if your node really has docker.sock
-          # volumeMounts:
-          #   - name: daemon-config
-          #     mountPath: /root/.config/daemon
-          #   - name: docker-sock
-          #     mountPath: /var/run/docker.sock
-          #     readOnly: true
 
         - name: server
           image: ghcr.io/scanopy/scanopy/server:latest
@@ -132,7 +137,7 @@ spec:
             - name: SCANOPY_LOG_LEVEL
               value: info
             - name: SCANOPY_DATABASE_URL
-              value: postgresql://postgres:password@postgres:5432/scanopy
+              value: postgresql://postgres:password@postgres.scanopy.svc.cluster.local:5432/scanopy
             - name: SCANOPY_WEB_EXTERNAL_PATH
               value: /app/static
             - name: SCANOPY_PUBLIC_URL
@@ -154,16 +159,11 @@ spec:
           hostPath:
             path: /data-nfs/data/scanopy/server-data
             type: DirectoryOrCreate
-        # Uncomment only if your node really has docker.sock
-        # - name: docker-sock
-        #   hostPath:
-        #     path: /var/run/docker.sock
-        #     type: Socket
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: scanopy-server
+  name: scanopy-web
   namespace: scanopy
 spec:
   selector:
@@ -174,3 +174,31 @@ spec:
       targetPort: 60072
   type: LoadBalancer
   loadBalancerIP: 172.16.23.41
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: scanopy-postgres-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: longhorn
+  csi:
+    driver: driver.longhorn.io
+    volumeHandle: scanopy-postgres-volume
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: scanopy
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
