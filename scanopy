@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scanopy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: scanopy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scanopy-postgres
+  template:
+    metadata:
+      labels:
+        app: scanopy-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              value: scanopy
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          hostPath:
+            path: /data-nfs/data/scanopy/postgres
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: scanopy
+spec:
+  selector:
+    app: scanopy-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanopy-app
+  namespace: scanopy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scanopy-app
+  template:
+    metadata:
+      labels:
+        app: scanopy-app
+    spec:
+      containers:
+        - name: daemon
+          image: ghcr.io/scanopy/scanopy/daemon:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: SCANOPY_LOG_LEVEL
+              value: info
+            - name: SCANOPY_SERVER_URL
+              value: http://127.0.0.1:60072
+          ports:
+            - containerPort: 60073
+              name: daemon-http
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 60073
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 15
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 60073
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 15
+          volumeMounts:
+            - name: daemon-config
+              mountPath: /root/.config/daemon
+          # Uncomment only if your node really has docker.sock
+          # volumeMounts:
+          #   - name: daemon-config
+          #     mountPath: /root/.config/daemon
+          #   - name: docker-sock
+          #     mountPath: /var/run/docker.sock
+          #     readOnly: true
+
+        - name: server
+          image: ghcr.io/scanopy/scanopy/server:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SCANOPY_LOG_LEVEL
+              value: info
+            - name: SCANOPY_DATABASE_URL
+              value: postgresql://postgres:password@postgres:5432/scanopy
+            - name: SCANOPY_WEB_EXTERNAL_PATH
+              value: /app/static
+            - name: SCANOPY_PUBLIC_URL
+              value: http://172.16.23.41:60072
+            - name: SCANOPY_INTEGRATED_DAEMON_URL
+              value: http://127.0.0.1:60073
+          ports:
+            - containerPort: 60072
+              name: server-http
+          volumeMounts:
+            - name: server-data
+              mountPath: /data
+      volumes:
+        - name: daemon-config
+          hostPath:
+            path: /data-nfs/data/scanopy/daemon-config
+            type: DirectoryOrCreate
+        - name: server-data
+          hostPath:
+            path: /data-nfs/data/scanopy/server-data
+            type: DirectoryOrCreate
+        # Uncomment only if your node really has docker.sock
+        # - name: docker-sock
+        #   hostPath:
+        #     path: /var/run/docker.sock
+        #     type: Socket
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scanopy-server
+  namespace: scanopy
+spec:
+  selector:
+    app: scanopy-app
+  ports:
+    - name: http
+      port: 60072
+      targetPort: 60072
+  type: LoadBalancer
+  loadBalancerIP: 172.16.23.41
